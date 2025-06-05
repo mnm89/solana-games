@@ -29,6 +29,8 @@ COPY solana-games ./
 # Learn more here: https://nextjs.org/telemetry
 # Uncomment the following line in case you want to disable telemetry during the build.
 ENV NEXT_TELEMETRY_DISABLED 1
+# Update this when the vm's IP changes or after setting a domain name
+ENV NEXT_PUBLIC_SOCKET_URL ws://57.154.188.238:81
 
 RUN \
     if [ -f yarn.lock ]; then yarn run build; \

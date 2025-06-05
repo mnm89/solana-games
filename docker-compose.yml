@@ -12,7 +12,5 @@ services:
       dockerfile: solana-games/Dockerfile
     ports: 
       - "80:3000"
-    environment:
-      - NEXT_PUBLIC_SOCKET_URL=ws://57.154.188.238:81
     depends_on:
       - socket-server
