@@ -1,0 +1,18 @@
+services:
+  socket-server:
+    build:
+      context: .
+      dockerfile: socket-server/Dockerfile
+    ports:
+      - "3001:3001"
+
+  solana-games:
+    build:
+      context: .
+      dockerfile: solana-games/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_SOCKET_URL=ws://localhost:3001
+    depends_on:
+      - socket-server
