@@ -14,17 +14,29 @@ import {
   ArrowLeft,
   Wifi,
   WifiOff,
+  Wallet,
+  DollarSign,
 } from "lucide-react";
+import { useWallet, useConnection } from "@solana/wallet-adapter-react";
+import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { socketManager, type Room, type Player } from "@/lib/socket";
+import {
+  SolanaService,
+  PROGRAM_WALLET,
+  GAME_FEE_PERCENTAGE,
+} from "@/lib/solana";
 import type { Socket } from "socket.io-client";
 
 export default function Component() {
+  const { publicKey, signTransaction, connected } = useWallet();
+  const { connection } = useConnection();
   const [currentScreen, setCurrentScreen] = useState<"lobby" | "room">("lobby");
   const [rooms, setRooms] = useState<Room[]>([]);
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
   const [currentPlayer, setCurrentPlayer] = useState<Player | null>(null);
   const [newRoomName, setNewRoomName] = useState("");
   const [playerName, setPlayerName] = useState("");
+  const [betAmount, setBetAmount] = useState<string>("0.1");
   const [clickAnimations, setClickAnimations] = useState<number[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -32,15 +44,23 @@ export default function Component() {
   const [opponentClickAnimations, setOpponentClickAnimations] = useState<
     number[]
   >([]);
+  const [walletBalance, setWalletBalance] = useState<number>(0);
+  const [isProcessingBet, setIsProcessingBet] = useState(false);
+  const [isClaimingWinnings, setIsClaimingWinnings] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
 
+  // Update wallet balance
   useEffect(() => {
-    // Initialize socket connection
-    const socket = socketManager.connect("click-battle");
+    if (publicKey && connected) {
+      SolanaService.getBalance(publicKey).then(setWalletBalance);
+    }
+  }, [publicKey, connected]);
+
+  useEffect(() => {
+    const socket = socketManager.connect();
     socketRef.current = socket;
 
-    // Connection status
     socket.on("connect", () => {
       setIsConnected(true);
       setConnectionError(null);
@@ -53,10 +73,9 @@ export default function Component() {
 
     socket.on("connect_error", () => {
       setIsConnected(false);
-      setConnectionError("Failed to connect to server. Using demo mode.");
+      setConnectionError("Failed to connect to server.");
     });
 
-    // Room events
     socket.on("rooms:list", (roomsList) => {
       setRooms(roomsList);
     });
@@ -71,22 +90,26 @@ export default function Component() {
       setCurrentRoom(room);
     });
 
+    socket.on("room:bet-required", async (amount) => {
+      if (!publicKey || !signTransaction) return;
+      await handleBetPayment(amount);
+    });
+
+    socket.on("room:bet-confirmed", (playerId) => {
+      console.log(`Bet confirmed for player ${playerId}`);
+      setIsProcessingBet(false);
+    });
+
     socket.on("room:countdown", (countdownValue) => {
       setCountdown(countdownValue);
     });
 
-    socket.on("room:game-start", () => {
-      // Game started
-    });
-
-    socket.on("room:game-end", (winner) => {
-      // Game ended
+    socket.on("room:payout-ready", (winner, amount) => {
+      console.log(`Payout ready: ${winner} wins ${amount} SOL`);
     });
 
     socket.on("player:click", (playerId, clicks) => {
-      // Handle opponent clicks for animations
       if (currentPlayer && playerId !== currentPlayer.id) {
-        // Add opponent click animation
         const animationId = Date.now();
         setOpponentClickAnimations((prev) => [...prev, animationId]);
         setTimeout(() => {
@@ -99,31 +122,90 @@ export default function Component() {
 
     socket.on("error", (message) => {
       setConnectionError(message);
+      setIsProcessingBet(false);
+      setIsClaimingWinnings(false);
     });
 
     return () => {
       socketManager.disconnect();
     };
-  }, []);
+  }, [currentPlayer]);
+
+  const handleBetPayment = async (amount: number) => {
+    if (!publicKey || !signTransaction || !socketRef.current || !connection)
+      return;
+
+    setIsProcessingBet(true);
+    try {
+      const transaction = await SolanaService.createBetTransaction(
+        publicKey,
+        PROGRAM_WALLET,
+        amount
+      );
+      const signedTransaction = await signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(
+        signedTransaction.serialize()
+      );
+
+      // Confirm transaction
+      const confirmed = await SolanaService.confirmTransaction(signature);
+      if (confirmed) {
+        socketRef.current.emit("room:confirm-bet", signature);
+        // Update balance
+        const newBalance = await SolanaService.getBalance(publicKey);
+        setWalletBalance(newBalance);
+      } else {
+        throw new Error("Transaction failed to confirm");
+      }
+    } catch (error) {
+      console.error("Bet payment failed:", error);
+      setConnectionError("Failed to process bet payment");
+      setIsProcessingBet(false);
+    }
+  };
 
   const createRoom = () => {
-    if (!newRoomName.trim() || !playerName.trim()) return;
+    if (!newRoomName.trim() || !playerName.trim() || !publicKey || !connected)
+      return;
+
+    const betAmountNum = Number.parseFloat(betAmount);
+    if (isNaN(betAmountNum) || betAmountNum <= 0) {
+      setConnectionError("Please enter a valid bet amount");
+      return;
+    }
+
+    if (betAmountNum > walletBalance) {
+      setConnectionError("Insufficient balance for bet");
+      return;
+    }
 
     if (socketRef.current?.connected) {
-      socketRef.current.emit("room:create", newRoomName, playerName);
+      socketRef.current.emit(
+        "room:create",
+        newRoomName,
+        playerName,
+        publicKey.toString(),
+        betAmountNum
+      );
       setNewRoomName("");
-    } else {
-      setConnectionError("Not connected to server");
     }
   };
 
   const joinRoom = (room: Room) => {
-    if (!playerName.trim()) return;
+    if (!playerName.trim() || !publicKey || !connected) return;
+
+    if (room.betAmount > walletBalance) {
+      setConnectionError("Insufficient balance to join this room");
+      return;
+    }
 
     if (socketRef.current?.connected) {
-      socketRef.current.emit("room:join", room.id, playerName);
-    } else {
-      setConnectionError("Not connected to server");
+      socketRef.current.emit(
+        "room:join",
+        room.id,
+        playerName,
+        publicKey.toString()
+      );
     }
   };
 
@@ -138,19 +220,41 @@ export default function Component() {
 
     if (socketRef.current?.connected) {
       socketRef.current.emit("player:click");
-
-      // Update local player score immediately for responsive UI
       setCurrentPlayer((prev) =>
         prev ? { ...prev, clicks: prev.clicks + 1 } : null
       );
     }
 
-    // Add click animation
     const animationId = Date.now();
     setClickAnimations((prev) => [...prev, animationId]);
     setTimeout(() => {
       setClickAnimations((prev) => prev.filter((id) => id !== animationId));
     }, 600);
+  };
+
+  const claimWinnings = async () => {
+    if (
+      !currentRoom ||
+      !publicKey ||
+      !signTransaction ||
+      currentRoom.status !== "payout"
+    )
+      return;
+
+    setIsClaimingWinnings(true);
+    try {
+      if (socketRef.current?.connected) {
+        socketRef.current.emit("room:claim-winnings");
+      }
+      // Update balance after claiming
+      setTimeout(async () => {
+        const newBalance = await SolanaService.getBalance(publicKey);
+        setWalletBalance(newBalance);
+      }, 3000);
+    } catch (error) {
+      console.error("Failed to claim winnings:", error);
+      setIsClaimingWinnings(false);
+    }
   };
 
   const leaveRoom = () => {
@@ -161,12 +265,6 @@ export default function Component() {
     setCurrentRoom(null);
     setCurrentPlayer(null);
     setClickAnimations([]);
-  };
-
-  const refreshRooms = () => {
-    if (socketRef.current?.connected) {
-      socketRef.current.emit("rooms:get");
-    }
   };
 
   const formatTime = (seconds: number) => {
@@ -200,6 +298,23 @@ export default function Component() {
             <h1 className="text-4xl font-bold text-white mb-4">
               Click Battle Arena
             </h1>
+            <p className="text-white/80 mb-4">Compete for real SOL rewards!</p>
+
+            {/* Wallet Connection */}
+            <div className="flex items-center justify-center gap-4 mb-4">
+              <WalletMultiButton />
+              {connected && publicKey && (
+                <Card className="bg-white/10 border-white/20 p-3">
+                  <div className="flex items-center gap-2 text-white">
+                    <Wallet className="w-4 h-4" />
+                    <span className="text-sm">
+                      {walletBalance.toFixed(4)} SOL
+                    </span>
+                  </div>
+                </Card>
+              )}
+            </div>
+
             <div className="flex items-center justify-center gap-2 mb-4">
               {isConnected ? (
                 <Badge
@@ -219,12 +334,16 @@ export default function Component() {
                 </Badge>
               )}
             </div>
-            <p className="text-white/80">
-              Join a room and battle other players in real-time!
-            </p>
           </div>
 
-          {/* Connection Error */}
+          {!connected && (
+            <Alert className="mb-6 bg-yellow-500/20 border-yellow-500/30">
+              <AlertDescription className="text-yellow-300">
+                Connect your Solana wallet to create or join betting rooms!
+              </AlertDescription>
+            </Alert>
+          )}
+
           {connectionError && (
             <Alert className="mb-6 bg-red-500/20 border-red-500/30">
               <AlertDescription className="text-red-300">
@@ -239,7 +358,7 @@ export default function Component() {
               <Plus className="w-5 h-5 mr-2" />
               Create New Battle
             </h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
               <Input
                 placeholder="Your name"
                 value={playerName}
@@ -252,42 +371,52 @@ export default function Component() {
                 onChange={(e) => setNewRoomName(e.target.value)}
                 className="bg-white/10 border-white/20 text-white placeholder:text-white/60"
               />
+              <div className="relative">
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  placeholder="Bet amount"
+                  value={betAmount}
+                  onChange={(e) => setBetAmount(e.target.value)}
+                  className="bg-white/10 border-white/20 text-white placeholder:text-white/60 pr-12"
+                />
+                <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-white/60 text-sm">
+                  SOL
+                </span>
+              </div>
               <Button
                 onClick={createRoom}
                 className="bg-green-600 hover:bg-green-700"
                 disabled={
-                  !newRoomName.trim() || !playerName.trim() || !isConnected
+                  !connected ||
+                  !newRoomName.trim() ||
+                  !playerName.trim() ||
+                  !isConnected
                 }
               >
                 Create Room
               </Button>
             </div>
+            {connected && (
+              <p className="text-white/60 text-sm mt-2">
+                Game fee: {GAME_FEE_PERCENTAGE}% • Winner takes{" "}
+                {100 - GAME_FEE_PERCENTAGE}% of total pot
+              </p>
+            )}
           </Card>
 
           {/* Available Rooms */}
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-2xl font-bold text-white flex items-center">
-                <Users className="w-6 h-6 mr-2" />
-                Available Rooms ({rooms.length})
-              </h2>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={refreshRooms}
-                disabled={!isConnected}
-                className="bg-white/10 border-white/20 text-white hover:bg-white/20"
-              >
-                Refresh
-              </Button>
-            </div>
+            <h2 className="text-2xl font-bold text-white flex items-center">
+              <Users className="w-6 h-6 mr-2" />
+              Available Rooms ({rooms.length})
+            </h2>
 
             {rooms.length === 0 ? (
               <Card className="bg-white/10 border-white/20 p-8 text-center">
                 <p className="text-white/60">
-                  {isConnected
-                    ? "No rooms available. Create one to start battling!"
-                    : "Connect to server to see available rooms"}
+                  No rooms available. Create one to start battling!
                 </p>
               </Card>
             ) : (
@@ -303,8 +432,29 @@ export default function Component() {
                           {room.name}
                         </h3>
                         <p className="text-white/60">
-                          Host: {room.player1?.name} • Waiting for opponent
+                          Host: {room.player1?.name}
                         </p>
+                        <div className="flex items-center gap-4 mt-2">
+                          <Badge
+                            variant="secondary"
+                            className="bg-green-500/20 text-green-300"
+                          >
+                            <DollarSign className="w-3 h-3 mr-1" />
+                            {room.betAmount} SOL
+                          </Badge>
+                          <Badge
+                            variant="secondary"
+                            className="bg-yellow-500/20 text-yellow-300"
+                          >
+                            <Trophy className="w-3 h-3 mr-1" />
+                            Winner gets{" "}
+                            {(room.betAmount *
+                              2 *
+                              (100 - GAME_FEE_PERCENTAGE)) /
+                              100}{" "}
+                            SOL
+                          </Badge>
+                        </div>
                       </div>
                       <div className="flex items-center gap-4">
                         <Badge
@@ -316,7 +466,9 @@ export default function Component() {
                         </Badge>
                         <Button
                           onClick={() => joinRoom(room)}
-                          disabled={!playerName.trim() || !isConnected}
+                          disabled={
+                            !connected || !playerName.trim() || !isConnected
+                          }
                           className="bg-blue-600 hover:bg-blue-700"
                         >
                           Join Battle
@@ -328,15 +480,6 @@ export default function Component() {
               </div>
             )}
           </div>
-
-          {/* Player Name Input for Joining */}
-          {!playerName && (
-            <Card className="bg-red-500/20 border-red-500/30 p-4 mt-6">
-              <p className="text-red-300 text-center">
-                Enter your name above to create or join a room!
-              </p>
-            </Card>
-          )}
         </div>
       </div>
     );
@@ -363,28 +506,21 @@ export default function Component() {
             <h1 className="text-2xl font-bold text-white">
               {currentRoom?.name}
             </h1>
-            {currentRoom?.status === "playing" && (
-              <div className="text-xl font-bold text-yellow-300">
-                {formatTime(currentRoom.gameTime)}
-              </div>
-            )}
-            <div className="flex items-center justify-center gap-2 mt-1">
-              {isConnected ? (
-                <Badge
-                  variant="secondary"
-                  className="bg-green-500/20 text-green-300 text-xs"
-                >
-                  <Wifi className="w-3 h-3 mr-1" />
-                  Live
-                </Badge>
-              ) : (
-                <Badge
-                  variant="secondary"
-                  className="bg-red-500/20 text-red-300 text-xs"
-                >
-                  <WifiOff className="w-3 h-3 mr-1" />
-                  Offline
-                </Badge>
+            <div className="flex items-center justify-center gap-4 mt-1">
+              <Badge
+                variant="secondary"
+                className="bg-green-500/20 text-green-300"
+              >
+                <DollarSign className="w-3 h-3 mr-1" />
+                Pot:{" "}
+                {currentRoom?.totalPot ||
+                  (currentRoom?.betAmount ? currentRoom.betAmount * 2 : 0)}{" "}
+                SOL
+              </Badge>
+              {currentRoom?.status === "playing" && (
+                <div className="text-xl font-bold text-yellow-300">
+                  {formatTime(currentRoom.gameTime)}
+                </div>
               )}
             </div>
           </div>
@@ -398,7 +534,6 @@ export default function Component() {
             }`}
           >
             <div className="text-center text-white relative">
-              {/* Opponent Click Animations */}
               {opponentClickAnimations.map((id) => (
                 <div
                   key={id}
@@ -424,6 +559,48 @@ export default function Component() {
             </div>
           </Card>
         </div>
+
+        {/* Bet Confirmation Status */}
+        {currentRoom?.status === "bet_confirmation" && (
+          <Card className="bg-orange-500/20 border-orange-500/30 p-6 mb-6 text-center">
+            <h2 className="text-xl font-bold text-orange-300 mb-4">
+              Bet Confirmation Required
+            </h2>
+            <p className="text-white/80 mb-4">
+              Both players must confirm their bet of {currentRoom.betAmount} SOL
+              to start the battle
+            </p>
+            <div className="flex justify-center gap-4">
+              <Badge
+                variant="secondary"
+                className={`${
+                  currentRoom.player1?.betPaid
+                    ? "bg-green-500/20 text-green-300"
+                    : "bg-red-500/20 text-red-300"
+                }`}
+              >
+                {currentRoom.player1?.name}:{" "}
+                {currentRoom.player1?.betPaid ? "Paid ✓" : "Pending"}
+              </Badge>
+              <Badge
+                variant="secondary"
+                className={`${
+                  currentRoom.player2?.betPaid
+                    ? "bg-green-500/20 text-green-300"
+                    : "bg-red-500/20 text-red-300"
+                }`}
+              >
+                {currentRoom.player2?.name}:{" "}
+                {currentRoom.player2?.betPaid ? "Paid ✓" : "Pending"}
+              </Badge>
+            </div>
+            {isProcessingBet && (
+              <div className="mt-4 text-yellow-300">
+                Processing your bet payment...
+              </div>
+            )}
+          </Card>
+        )}
 
         {/* Game Status */}
         {currentRoom?.status === "waiting" && (
@@ -454,21 +631,6 @@ export default function Component() {
             >
               {currentPlayer?.isReady ? "Ready! ✓" : "Click when Ready"}
             </Button>
-            <div className="mt-4 text-white/80">
-              {currentRoom.player1?.isReady && currentRoom.player2?.isReady
-                ? "Both players ready! Starting countdown..."
-                : `${
-                    currentRoom.player1?.isReady ? currentRoom.player1.name : ""
-                  } ${
-                    currentRoom.player2?.isReady ? currentRoom.player2.name : ""
-                  } ${
-                    (currentRoom.player1?.isReady ? 1 : 0) +
-                      (currentRoom.player2?.isReady ? 1 : 0) ===
-                    1
-                      ? "is ready"
-                      : ""
-                  }`}
-            </div>
           </Card>
         )}
 
@@ -489,13 +651,41 @@ export default function Component() {
                 ? "It's a Tie!"
                 : `${currentRoom.winner} Wins!`}
             </h2>
-            <p className="text-white/80">
+            <p className="text-white/80 mb-4">
               Final Score: {currentRoom.player1?.name}{" "}
               {currentRoom.player1?.clicks} - {currentRoom.player2?.clicks}{" "}
               {currentRoom.player2?.name}
             </p>
+            {currentRoom.winner !== "Tie" && (
+              <p className="text-green-300 font-bold">
+                Winner receives:{" "}
+                {(currentRoom.totalPot * (100 - GAME_FEE_PERCENTAGE)) / 100} SOL
+              </p>
+            )}
           </Card>
         )}
+
+        {currentRoom?.status === "payout" &&
+          currentRoom.winner === currentPlayer?.name && (
+            <Card className="bg-green-500/20 border-green-500/30 p-6 mb-6 text-center">
+              <Trophy className="w-12 h-12 mx-auto text-green-400 mb-4" />
+              <h2 className="text-2xl font-bold text-green-300 mb-4">
+                Congratulations! You Won!
+              </h2>
+              <Button
+                onClick={claimWinnings}
+                size="lg"
+                disabled={isClaimingWinnings}
+                className="bg-green-600 hover:bg-green-700"
+              >
+                {isClaimingWinnings
+                  ? "Claiming..."
+                  : `Claim ${
+                      (currentRoom.totalPot * (100 - GAME_FEE_PERCENTAGE)) / 100
+                    } SOL`}
+              </Button>
+            </Card>
+          )}
 
         {/* Click Area */}
         {currentRoom &&
@@ -514,7 +704,6 @@ export default function Component() {
               onClick={handleClick}
             >
               <div className="h-full flex flex-col items-center justify-center text-white p-8 relative">
-                {/* Click Animations */}
                 {clickAnimations.map((id) => (
                   <div
                     key={id}
@@ -538,12 +727,9 @@ export default function Component() {
                   <Badge variant="secondary" className="text-lg px-4 py-2">
                     {currentRoom.status === "playing" && isConnected
                       ? "Click Here!"
-                      : currentRoom.status === "finished"
-                      ? "Game Over"
-                      : "Waiting..."}
+                      : "Game Over"}
                   </Badge>
 
-                  {/* Leading indicator */}
                   {currentRoom.status === "playing" &&
                     getLeadingPlayer() === "player" && (
                       <div className="mt-4 text-yellow-300 font-bold text-xl animate-bounce">

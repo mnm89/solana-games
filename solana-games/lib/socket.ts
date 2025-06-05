@@ -3,19 +3,36 @@ import { io, type Socket } from "socket.io-client";
 export interface Player {
   id: string;
   name: string;
+  walletAddress: string;
   clicks: number;
   isReady: boolean;
+  betPaid: boolean;
+  balance?: number;
 }
 
 export interface Room {
   id: string;
   name: string;
+  betAmount: number; // in SOL
   player1: Player | null;
   player2: Player | null;
-  status: "waiting" | "ready" | "countdown" | "playing" | "finished";
+  status:
+    | "waiting"
+    | "bet_confirmation"
+    | "ready"
+    | "countdown"
+    | "playing"
+    | "finished"
+    | "payout";
   countdown: number;
   gameTime: number;
   winner: string | null;
+  totalPot: number;
+  transactions: {
+    player1Bet?: string;
+    player2Bet?: string;
+    winnerPayout?: string;
+  };
 }
 
 export interface ServerToClientEvents {
@@ -25,81 +42,87 @@ export interface ServerToClientEvents {
   "room:countdown": (countdown: number) => void;
   "room:game-start": () => void;
   "room:game-end": (winner: string) => void;
+  "room:bet-required": (amount: number) => void;
+  "room:bet-confirmed": (playerId: string) => void;
+  "room:payout-ready": (winner: string, amount: number) => void;
   "player:click": (playerId: string, clicks: number) => void;
   error: (message: string) => void;
 }
 
 export interface ClientToServerEvents {
   "rooms:get": () => void;
-  "room:create": (roomName: string, playerName: string) => void;
-  "room:join": (roomId: string, playerName: string) => void;
+  "room:create": (
+    roomName: string,
+    playerName: string,
+    walletAddress: string,
+    betAmount: number
+  ) => void;
+  "room:join": (
+    roomId: string,
+    playerName: string,
+    walletAddress: string
+  ) => void;
   "room:leave": () => void;
+  "room:confirm-bet": (transactionSignature: string) => void;
   "player:ready": () => void;
   "player:click": () => void;
+  "room:claim-winnings": () => void;
 }
-type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
 class SocketManager {
-  private sockets: Map<string, TypedSocket> = new Map();
-  private reconnectAttempts: Map<string, number> = new Map();
+  private socket: Socket<ServerToClientEvents, ClientToServerEvents> | null =
+    null;
+  private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
 
-  connect(namespace = ""): TypedSocket {
-    const ns = namespace.startsWith("/") ? namespace : `/${namespace}`;
-
-    if (this.sockets.has(ns) && this.sockets.get(ns)!.connected) {
-      return this.sockets.get(ns)!;
+  connect(): Socket<ServerToClientEvents, ClientToServerEvents> {
+    if (this.socket?.connected) {
+      return this.socket;
     }
 
     const serverUrl =
       process.env.NEXT_PUBLIC_SOCKET_URL || "ws://localhost:3001";
 
-    const socket = io(`${serverUrl}${ns}`, {
+    this.socket = io(serverUrl, {
       transports: ["websocket"],
       autoConnect: true,
     });
 
-    socket.on("connect", () => {
-      console.log(`Connected to ${ns || "/"}`);
-      this.reconnectAttempts.set(ns, 0);
+    this.socket.on("connect", () => {
+      console.log("Connected to server");
+      this.reconnectAttempts = 0;
     });
 
-    socket.on("disconnect", () => {
-      console.log(`Disconnected from ${ns || "/"}`);
-      this.handleReconnect(ns);
+    this.socket.on("disconnect", () => {
+      console.log("Disconnected from server");
+      this.handleReconnect();
     });
 
-    socket.on("connect_error", (error) => {
-      console.error(`Connection error on ${ns || "/"}`, error);
-      this.handleReconnect(ns);
+    this.socket.on("connect_error", (error) => {
+      console.error("Connection error:", error);
+      this.handleReconnect();
     });
 
-    this.sockets.set(ns, socket);
-    return socket;
+    return this.socket;
   }
 
-  private handleReconnect(namespace: string) {
-    const attempts = this.reconnectAttempts.get(namespace) || 0;
-    if (attempts < this.maxReconnectAttempts) {
-      const nextAttempts = attempts + 1;
-      this.reconnectAttempts.set(namespace, nextAttempts);
+  private handleReconnect() {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
       setTimeout(() => {
-        console.log(`Reconnection attempt ${nextAttempts} to ${namespace}`);
-        this.sockets.get(namespace)?.connect();
-      }, 2000 * nextAttempts);
+        console.log(`Reconnection attempt ${this.reconnectAttempts}`);
+        this.socket?.connect();
+      }, 2000 * this.reconnectAttempts);
     }
   }
 
-  disconnect(namespace = "") {
-    const ns = namespace.startsWith("/") ? namespace : `/${namespace}`;
-    this.sockets.get(ns)?.disconnect();
-    this.sockets.delete(ns);
-    this.reconnectAttempts.delete(ns);
+  disconnect() {
+    this.socket?.disconnect();
+    this.socket = null;
   }
 
-  getSocket(namespace = ""): TypedSocket | undefined {
-    const ns = namespace.startsWith("/") ? namespace : `/${namespace}`;
-    return this.sockets.get(ns);
+  getSocket() {
+    return this.socket;
   }
 }
 
