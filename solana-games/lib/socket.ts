@@ -68,61 +68,69 @@ export interface ClientToServerEvents {
   "player:click": () => void;
   "room:claim-winnings": () => void;
 }
+type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
 class SocketManager {
-  private socket: Socket<ServerToClientEvents, ClientToServerEvents> | null =
-    null;
-  private reconnectAttempts = 0;
+  private sockets: Map<string, TypedSocket> = new Map();
+  private reconnectAttempts: Map<string, number> = new Map();
   private maxReconnectAttempts = 5;
 
-  connect(): Socket<ServerToClientEvents, ClientToServerEvents> {
-    if (this.socket?.connected) {
-      return this.socket;
+  connect(namespace = ""): TypedSocket {
+    const ns = namespace.startsWith("/") ? namespace : `/${namespace}`;
+
+    if (this.sockets.has(ns) && this.sockets.get(ns)!.connected) {
+      return this.sockets.get(ns)!;
     }
 
     const serverUrl =
       process.env.NEXT_PUBLIC_SOCKET_URL || "ws://localhost:3001";
 
-    this.socket = io(serverUrl, {
+    const socket = io(`${serverUrl}${ns}`, {
       transports: ["websocket"],
       autoConnect: true,
     });
 
-    this.socket.on("connect", () => {
-      console.log("Connected to server");
-      this.reconnectAttempts = 0;
+    socket.on("connect", () => {
+      console.log(`Connected to ${ns || "/"}`);
+      this.reconnectAttempts.set(ns, 0);
     });
 
-    this.socket.on("disconnect", () => {
-      console.log("Disconnected from server");
-      this.handleReconnect();
+    socket.on("disconnect", () => {
+      console.log(`Disconnected from ${ns || "/"}`);
+      this.handleReconnect(ns);
     });
 
-    this.socket.on("connect_error", (error) => {
-      console.error("Connection error:", error);
-      this.handleReconnect();
+    socket.on("connect_error", (error) => {
+      console.error(`Connection error on ${ns || "/"}`, error);
+      this.handleReconnect(ns);
     });
 
-    return this.socket;
+    this.sockets.set(ns, socket);
+    return socket;
   }
 
-  private handleReconnect() {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++;
+  private handleReconnect(namespace: string) {
+    const attempts = this.reconnectAttempts.get(namespace) || 0;
+    if (attempts < this.maxReconnectAttempts) {
+      const nextAttempts = attempts + 1;
+      this.reconnectAttempts.set(namespace, nextAttempts);
       setTimeout(() => {
-        console.log(`Reconnection attempt ${this.reconnectAttempts}`);
-        this.socket?.connect();
-      }, 2000 * this.reconnectAttempts);
+        console.log(`Reconnection attempt ${nextAttempts} to ${namespace}`);
+        this.sockets.get(namespace)?.connect();
+      }, 2000 * nextAttempts);
     }
   }
 
-  disconnect() {
-    this.socket?.disconnect();
-    this.socket = null;
+  disconnect(namespace = "") {
+    const ns = namespace.startsWith("/") ? namespace : `/${namespace}`;
+    this.sockets.get(ns)?.disconnect();
+    this.sockets.delete(ns);
+    this.reconnectAttempts.delete(ns);
   }
 
-  getSocket() {
-    return this.socket;
+  getSocket(namespace = ""): TypedSocket | undefined {
+    const ns = namespace.startsWith("/") ? namespace : `/${namespace}`;
+    return this.sockets.get(ns);
   }
 }
 

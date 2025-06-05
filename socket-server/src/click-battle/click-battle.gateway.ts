@@ -39,7 +39,10 @@ export class ClickBattleGateway
     socket.emit('rooms:list', this.service.getRooms());
   }
   @SubscribeMessage('room:create')
-  async handleCreateRoom(socket: Socket, data: [string, string]) {
+  async handleCreateRoom(
+    socket: Socket,
+    data: [string, string, string, number],
+  ) {
     const [room, player] = this.service.createRoom(socket, ...data);
     await socket.join(room.id);
     socket.emit('room:joined', room, player);
@@ -48,20 +51,44 @@ export class ClickBattleGateway
     this.server.emit('rooms:list', this.service.getRooms());
   }
   @SubscribeMessage('room:join')
-  async handleJoinRoom(socket: Socket, data: [string, string]) {
+  async handleJoinRoom(socket: Socket, data: [string, string, string]) {
     try {
       const [room, player] = this.service.joinRoom(socket, ...data);
       await socket.join(room.id);
       socket.emit('room:joined', room, player);
 
       this.server.to(room.id).emit('room:updated', room);
+
+      // Trigger bet payment for both players
+      this.server.to(room.id).emit('room:bet-required', room.betAmount);
       // Broadcast updated rooms list
+      // Remove from waiting rooms list
       this.server.emit('rooms:list', this.service.getRooms());
     } catch (error) {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       socket.emit('error', error.message);
     }
   }
+  @SubscribeMessage('room:confirm-bet')
+  handleRoomConfirmBet(socket: Socket, data: [string]) {
+    const room = this.service.confirmBet(socket, ...data);
+    if (room) {
+      // Emit bet confirmation
+      this.server.to(room.id).emit('room:bet-confirmed', socket.id);
+
+      this.server.to(room.id).emit('room:updated', room);
+    }
+  }
+
+  @SubscribeMessage('room:leave')
+  async handleRoomLeave(socket: Socket) {
+    await this.service.leaveRoom(socket, this.server);
+  }
+  @SubscribeMessage('room:claim-winnings')
+  handleRoomClaimWinning(socket: Socket) {
+    this.service.claimWinnings(socket, this.server);
+  }
+
   @SubscribeMessage('player:ready')
   handlePlayerReady(socket: Socket) {
     const room = this.service.playerReady(socket, this.server);
@@ -75,10 +102,5 @@ export class ClickBattleGateway
     if (room) {
       this.server.to(room.id).emit('room:updated', room);
     }
-  }
-
-  @SubscribeMessage('room:leave')
-  async handleRoomLeave(socket: Socket) {
-    await this.service.leaveRoom(socket, this.server);
   }
 }

@@ -58,7 +58,7 @@ export default function Component() {
   }, [publicKey, connected]);
 
   useEffect(() => {
-    const socket = socketManager.connect();
+    const socket = socketManager.connect("click-battle");
     socketRef.current = socket;
 
     socket.on("connect", () => {
