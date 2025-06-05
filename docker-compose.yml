@@ -4,15 +4,15 @@ services:
       context: .
       dockerfile: socket-server/Dockerfile
     ports:
-      - "3001:3001"
+      - "81:3001"
 
   solana-games:
     build:
       context: .
       dockerfile: solana-games/Dockerfile
-    ports:
-      - "3000:3000"
+    ports: 
+      - "80:3000"
     environment:
-      - NEXT_PUBLIC_SOCKET_URL=ws://localhost:3001
+      - NEXT_PUBLIC_SOCKET_URL=ws://57.154.188.238:81
     depends_on:
       - socket-server
